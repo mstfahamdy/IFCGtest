@@ -2,17 +2,25 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { SalesOrder } from "../types";
 import { PRODUCT_CATALOG } from "../constants";
 
-// Initialize the Gemini API client with the API key from environment variables
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
 const productNames = PRODUCT_CATALOG.join(", ");
 
+// Safe initialization of AI client
+const getAIClient = () => {
+  if (typeof process === 'undefined' || !process.env.API_KEY) {
+    console.warn("API Key is missing. AI features will be disabled.");
+    return null;
+  }
+  return new GoogleGenAI({ apiKey: process.env.API_KEY });
+};
+
 export const parseOrderFromText = async (text: string): Promise<Partial<SalesOrder>> => {
-  // Use gemini-3-flash-preview for extraction tasks as per guidelines
+  const ai = getAIClient();
+  if (!ai) throw new Error("AI Client not initialized. Please check API key.");
+
   const model = "gemini-3-flash-preview";
   
   const systemInstruction = `
-    You are a data entry assistant for a food distribution company. 
+    You are a data entry assistant for a food distribution company (IFCG). 
     Your job is to extract sales order details from informal text (like WhatsApp messages).
     
     The available products in the catalog are:
@@ -24,6 +32,7 @@ export const parseOrderFromText = async (text: string): Promise<Partial<SalesOrd
     3. Extract the quantity.
     4. Extract the Client Name and Location (Area) if available.
     5. Return the date if mentioned, otherwise today's date in YYYY-MM-DD.
+    6. Return ONLY a valid JSON object.
   `;
 
   try {
@@ -57,7 +66,6 @@ export const parseOrderFromText = async (text: string): Promise<Partial<SalesOrd
       }
     });
 
-    // Access text property directly as per guidelines
     const resultText = response.text;
     if (resultText) {
       return JSON.parse(resultText.trim()) as Partial<SalesOrder>;

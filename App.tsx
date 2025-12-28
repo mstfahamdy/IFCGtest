@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { 
   Plus, Trash2, Send, ShoppingCart, User, MapPin, Calendar, FileText, CheckCircle2, 
   ClipboardList, ArrowRight, History, ArrowLeft, Package, AlertCircle, LogOut, 
@@ -6,20 +6,20 @@ import {
   KeyRound, ChevronDown, Hash, Phone, PauseCircle, AlertTriangle, Save, Mail, 
   Search, FileSpreadsheet, Download, Eye, EyeOff, Languages, Siren, Clock, 
   RefreshCw, Upload, Filter, CircleCheck, Sparkles, ShieldAlert, Camera, Image as LucideImage, Maximize2,
-  ListPlus, Info, CheckCircle
+  ListPlus, Info, CheckCircle, Wifi, WifiOff, CloudUpload, CloudSync
 } from 'lucide-react';
 import { PRODUCT_CATALOG, CUSTOMER_LIST, WAREHOUSES, DRIVERS_FLEET, DELIVERY_SHIFTS } from './constants.ts';
 import { OrderItem, SalesOrder, OrderStatus, Role, Shipment, EmergencyReport, UserProfile } from './types.ts';
 import { getUserByPin } from './users.ts';
 import { TRANSLATIONS } from './translations.ts';
 import { MagicParser } from './components/MagicParser.tsx';
+import { ApiService } from './services/apiService.ts';
 
 // --- STYLING CONSTANTS ---
 const INPUT_CLASS = "w-full bg-gray-900/50 border border-gray-800/50 rounded-2xl py-3.5 px-5 text-white focus:ring-2 focus:ring-blue-600 focus:border-transparent outline-none transition-all placeholder-gray-600 font-medium text-sm shadow-inner";
 const LABEL_CLASS = "text-[10px] font-black text-gray-500 px-1 uppercase tracking-[0.15em] mb-2 block";
 const CARD_CLASS = "glass rounded-[32px] p-6 shadow-2xl border border-gray-800/50";
 
-// --- HELPERS ---
 const StatusBadge = ({ status, t }: { status?: OrderStatus, t: any }) => {
   const styles: Record<string, string> = {
     'Pending Assistant': 'bg-blue-900/20 text-blue-400 border-blue-800/30',
@@ -45,23 +45,15 @@ export default function App() {
   const [lang, setLang] = useState<'ar' | 'en'>(() => (localStorage.getItem('ifcg_lang') as 'ar' | 'en') || 'ar');
   const t = TRANSLATIONS[lang];
 
-  useEffect(() => {
-    document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
-    document.documentElement.lang = lang;
-    localStorage.setItem('ifcg_lang', lang);
-  }, [lang]);
-
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => {
     const saved = sessionStorage.getItem('ifcg_user_session_v4');
     return saved ? JSON.parse(saved) : null;
   });
 
-  const [globalOrders, setGlobalOrders] = useState<SalesOrder[]>(() => {
-    const saved = localStorage.getItem('ifcg_shared_db_v4');
-    return saved ? JSON.parse(saved) : [];
-  });
-
-  const [isLoading, setIsLoading] = useState(false);
+  const [globalOrders, setGlobalOrders] = useState<SalesOrder[]>([]);
+  const [lastSync, setLastSync] = useState<Date>(new Date());
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [loginTargetRole, setLoginTargetRole] = useState<Role | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -76,26 +68,41 @@ export default function App() {
     overallNotes: '', serialNumber: ''
   };
 
-  const [order, setOrder] = useState<SalesOrder>(() => {
-    const draft = localStorage.getItem('ifcg_order_draft');
-    return draft ? JSON.parse(draft) : initialOrderState;
-  });
+  const [order, setOrder] = useState<SalesOrder>(initialOrderState);
 
-  // Persist draft
-  useEffect(() => {
-    if (activeTab === 'pending' && !editingId && order.items.length > 0) {
-      localStorage.setItem('ifcg_order_draft', JSON.stringify(order));
+  // --- REFRESH DATA FROM CLOUD ---
+  const refreshOrders = useCallback(async () => {
+    if (isSyncing) return;
+    setIsSyncing(true);
+    try {
+      const orders = await ApiService.getOrders();
+      setGlobalOrders(orders);
+      setLastSync(new Date());
+      setIsOnline(true);
+    } catch (err) {
+      setIsOnline(false);
+    } finally {
+      setIsSyncing(false);
     }
-  }, [order, activeTab, editingId]);
+  }, [isSyncing]);
+
+  // Initial load and setup 10s polling
+  useEffect(() => {
+    refreshOrders();
+    const interval = setInterval(refreshOrders, 10000); // 10 second refresh
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
+    document.documentElement.lang = lang;
+    localStorage.setItem('ifcg_lang', lang);
+  }, [lang]);
 
   useEffect(() => {
     if (currentUser) sessionStorage.setItem('ifcg_user_session_v4', JSON.stringify(currentUser));
     else sessionStorage.removeItem('ifcg_user_session_v4');
   }, [currentUser]);
-
-  useEffect(() => {
-    localStorage.setItem('ifcg_shared_db_v4', JSON.stringify(globalOrders));
-  }, [globalOrders]);
 
   const handleOrderSubmit = async () => {
     if (!order.customerName || !order.areaLocation || order.items.length === 0 || !order.receivingDate) {
@@ -103,56 +110,70 @@ export default function App() {
       return;
     }
     setSubmissionStatus('submitting');
-    await new Promise(r => setTimeout(r, 1200));
 
-    let newList: SalesOrder[];
-    if (editingId) {
-      newList = globalOrders.map(o => o.id === editingId ? { 
-          ...order, 
-          id: editingId, 
-          status: o.status || 'Pending Assistant',
-          history: [...(o.history || []), { role: currentUser?.role || 'Sales', action: 'Order Modified', date: new Date().toLocaleString(), user: currentUser?.name }] 
-      } : o);
-    } else {
-      const newOrder: SalesOrder = {
-        ...order,
-        id: Math.random().toString(36).substr(2, 9),
-        serialNumber: `SO-${Math.floor(100000 + Math.random() * 900000)}`,
-        status: 'Pending Assistant',
-        createdBy: currentUser?.email,
-        creatorName: currentUser?.name,
-        history: [{ role: 'Sales Supervisor', action: 'Order Created', date: new Date().toLocaleString(), user: currentUser?.name }]
-      };
-      newList = [newOrder, ...globalOrders];
-    }
-    
-    setGlobalOrders(newList);
-    localStorage.removeItem('ifcg_order_draft');
-    setSubmissionStatus('success');
-    
-    setTimeout(() => {
+    try {
+      let finalOrder: SalesOrder;
+      const isNew = !editingId;
+
+      if (!isNew) {
+        const existing = globalOrders.find(o => o.id === editingId);
+        finalOrder = { 
+            ...order, 
+            id: editingId, 
+            status: existing?.status || 'Pending Assistant',
+            history: [...(existing?.history || []), { role: currentUser?.role || 'Sales', action: 'Order Modified', date: new Date().toLocaleString(), user: currentUser?.name }] 
+        };
+      } else {
+        finalOrder = {
+          ...order,
+          id: Math.random().toString(36).substr(2, 9),
+          serialNumber: `SO-${Math.floor(100000 + Math.random() * 900000)}`,
+          status: 'Pending Assistant',
+          createdBy: currentUser?.email,
+          creatorName: currentUser?.name,
+          history: [{ role: 'Sales Supervisor', action: 'Order Created', date: new Date().toLocaleString(), user: currentUser?.name }]
+        };
+      }
+
+      await ApiService.saveOrder(finalOrder, isNew);
+      await refreshOrders(); // Instant refresh after save
+      
+      localStorage.removeItem('ifcg_order_draft');
+      setSubmissionStatus('success');
+      
+      setTimeout(() => {
+        setSubmissionStatus('idle');
+        setEditingId(null);
+        setOrder(initialOrderState);
+        setActiveTab('history');
+      }, 2000);
+    } catch (error) {
+      setValidationError("Failed to save to cloud. Please try again.");
       setSubmissionStatus('idle');
-      setEditingId(null);
-      setOrder(initialOrderState);
-      setActiveTab('history');
-    }, 2000);
+    }
   };
 
   const updateStatus = async (orderId: string, updates: Partial<SalesOrder>, actionMsg: string) => {
-    const updated = globalOrders.map(o => {
-      if (o.id !== orderId) return o;
-      return {
-        ...o,
-        ...updates,
-        history: [...(o.history || []), {
-          role: currentUser?.role || 'Unknown',
-          action: actionMsg,
-          date: new Date().toLocaleString(),
-          user: currentUser?.name || 'System'
-        }]
+    try {
+      const historyItem = {
+        role: currentUser?.role || 'Unknown',
+        action: actionMsg,
+        date: new Date().toLocaleString(),
+        user: currentUser?.name || 'System'
       };
-    });
-    setGlobalOrders(updated);
+      
+      const orderToUpdate = globalOrders.find(o => o.id === orderId);
+      if (orderToUpdate) {
+        const newUpdates = {
+          ...updates,
+          history: [...(orderToUpdate.history || []), historyItem]
+        };
+        await ApiService.updateOrderStatus(orderId, newUpdates);
+        await refreshOrders();
+      }
+    } catch (error) {
+      alert("Status update failed. Check connection.");
+    }
   };
 
   const filtered = useMemo(() => {
@@ -211,7 +232,7 @@ export default function App() {
 
         {loginTargetRole && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/90 backdrop-blur-xl animate-in zoom-in-95 duration-200">
-            <div className="w-full max-w-sm glass p-10 rounded-[40px] text-center border border-white/5">
+            <div className="w-full max-sm glass p-10 rounded-[40px] text-center border border-white/5 mx-4">
               <div className="w-16 h-16 rounded-2xl bg-blue-600/10 flex items-center justify-center mx-auto mb-6">
                 <Lock className="text-blue-500" size={32} />
               </div>
@@ -241,7 +262,6 @@ export default function App() {
     );
   }
 
-  // --- MAIN APP VIEW ---
   return (
     <div className="min-h-screen pb-24">
       <header className="sticky top-0 z-40 glass border-b border-white/5 px-6 py-4">
@@ -249,10 +269,17 @@ export default function App() {
           <div className="flex items-center gap-4">
             <div className="bg-blue-600 p-2 rounded-xl shadow-lg"><Wheat size={20} className="text-white"/></div>
             <div>
-              <h1 className="text-lg font-black tracking-tighter text-white">IFCG <span className="text-blue-500">CLOUD</span></h1>
               <div className="flex items-center gap-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
+                <h1 className="text-lg font-black tracking-tighter text-white">IFCG <span className="text-blue-500">CLOUD</span></h1>
+                <div className={`px-2 py-0.5 rounded-full border text-[8px] font-black uppercase tracking-widest flex items-center gap-1 ${isOnline ? 'bg-emerald-900/20 text-emerald-400 border-emerald-800/30' : 'bg-red-900/20 text-red-400 border-red-800/30'}`}>
+                  {isSyncing ? <RefreshCw size={10} className="animate-spin text-blue-400" /> : (isOnline ? <Wifi size={10} /> : <WifiOff size={10} />)}
+                  {isOnline ? 'Live' : 'Disconnected'}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className={`w-1.5 h-1.5 rounded-full ${isOnline ? 'bg-blue-500 animate-pulse' : 'bg-red-500'}`}></div>
                 <span className="text-[9px] text-gray-500 font-bold uppercase tracking-widest">{t[`role_${currentUser.role}` as keyof typeof t] as string}</span>
+                <span className="text-[8px] text-gray-700 font-bold uppercase"> • Last Sync: {lastSync.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
               </div>
             </div>
           </div>
@@ -264,7 +291,6 @@ export default function App() {
       </header>
 
       <main className="max-w-4xl mx-auto p-6 space-y-8">
-        {/* Dashboard Tabs */}
         <div className="p-1.5 rounded-3xl bg-gray-900/50 border border-gray-800 flex shadow-2xl">
           <button onClick={() => setActiveTab('pending')} className={`flex-1 py-4 text-xs font-black rounded-2xl transition-all uppercase tracking-widest ${activeTab === 'pending' ? 'bg-blue-600 text-white shadow-xl shadow-blue-500/30' : 'text-gray-500 hover:text-gray-300'}`}>
             {currentUser.role === 'sales' ? t.newOrder : t.tab_reviewPending}
@@ -274,7 +300,6 @@ export default function App() {
           </button>
         </div>
 
-        {/* Main Interface Content */}
         {activeTab === 'pending' && currentUser.role === 'sales' && submissionStatus !== 'success' && (
           <div className="space-y-6 animate-in slide-in-from-bottom-4 duration-500">
             <div className={CARD_CLASS}>
@@ -283,16 +308,12 @@ export default function App() {
                   <div className="w-10 h-10 rounded-xl bg-blue-600/10 flex items-center justify-center text-blue-500"><ListPlus size={22}/></div>
                   <h2 className="text-2xl font-black text-white">{editingId ? t.editingOrder : t.newOrder}</h2>
                 </div>
-                <button 
-                  onClick={() => setIsMagicImportOpen(true)}
-                  className="px-5 py-3 rounded-2xl bg-indigo-600/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-600 hover:text-white transition-all text-[10px] font-black uppercase tracking-widest flex items-center gap-2"
-                >
+                <button onClick={() => setIsMagicImportOpen(true)} className="px-5 py-3 rounded-2xl bg-indigo-600/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-600 hover:text-white transition-all text-[10px] font-black uppercase tracking-widest flex items-center gap-2">
                   <Sparkles size={16}/> Magic AI
                 </button>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                {/* Client Section */}
                 <div className="space-y-6 md:col-span-2">
                    <div className="flex items-center gap-2 mb-2 border-b border-gray-800 pb-2">
                      <Info size={14} className="text-blue-500" />
@@ -301,16 +322,10 @@ export default function App() {
                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div className="space-y-1">
                       <label className={LABEL_CLASS}>{t.clientName}</label>
-                      <input 
-                        className={INPUT_CLASS} 
-                        list="clients" 
-                        value={order.customerName} 
-                        onChange={e => {
+                      <input className={INPUT_CLASS} list="clients" value={order.customerName} onChange={e => {
                           const found = CUSTOMER_LIST.find(c => c.name === e.target.value);
                           setOrder({...order, customerName: e.target.value, areaLocation: found ? found.location : order.areaLocation});
-                        }} 
-                        placeholder={t.selectClient as string} 
-                      />
+                        }} placeholder={t.selectClient as string} />
                       <datalist id="clients">{CUSTOMER_LIST.map(c => <option key={c.name} value={c.name} />)}</datalist>
                     </div>
                     <div className="space-y-1">
@@ -320,7 +335,6 @@ export default function App() {
                    </div>
                 </div>
 
-                {/* Logistics Section */}
                 <div className="space-y-1">
                   <label className={LABEL_CLASS}>{t.receivingDate}</label>
                   <div className="relative">
@@ -341,17 +355,13 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Items Section */}
               <div className="mt-12 space-y-6">
                 <div className="flex justify-between items-center border-b border-gray-800 pb-4">
                   <div className="flex items-center gap-2">
                     <ShoppingCart size={18} className="text-blue-500"/>
                     <h3 className="font-black text-white uppercase tracking-widest text-xs">{t.orderItems}</h3>
                   </div>
-                  <button 
-                    onClick={() => setOrder({...order, items: [...order.items, {id: Math.random().toString(36).substr(2, 9), itemName: '', quantity: 1}]})}
-                    className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-blue-700 transition-all shadow-lg shadow-blue-500/20"
-                  >
+                  <button onClick={() => setOrder({...order, items: [...order.items, {id: Math.random().toString(36).substr(2, 9), itemName: '', quantity: 1}]})} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-blue-700 transition-all shadow-lg shadow-blue-500/20">
                     <Plus size={14}/> {t.addItem}
                   </button>
                 </div>
@@ -367,31 +377,17 @@ export default function App() {
                       <div key={item.id} className="flex gap-3 items-center group animate-in slide-in-from-left duration-300">
                         <div className="relative flex-1">
                            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-700" size={14}/>
-                           <input 
-                            className={`${INPUT_CLASS} pl-10`} 
-                            list="products" 
-                            value={item.itemName} 
-                            onChange={e => {
+                           <input className={`${INPUT_CLASS} pl-10`} list="products" value={item.itemName} onChange={e => {
                               const n = [...order.items]; n[idx].itemName = e.target.value; setOrder({...order, items: n});
-                            }} 
-                            placeholder={t.searchProduct as string} 
-                          />
+                            }} placeholder={t.searchProduct as string} />
                           <datalist id="products">{PRODUCT_CATALOG.map(p => <option key={p} value={p} />)}</datalist>
                         </div>
                         <div className="relative w-24">
-                          <input 
-                            type="number" 
-                            className={`${INPUT_CLASS} text-center font-black !px-2`} 
-                            value={item.quantity} 
-                            onChange={e => {
+                          <input type="number" className={`${INPUT_CLASS} text-center font-black !px-2`} value={item.quantity} onChange={e => {
                               const n = [...order.items]; n[idx].quantity = parseInt(e.target.value) || 0; setOrder({...order, items: n});
-                            }} 
-                          />
+                            }} />
                         </div>
-                        <button 
-                          onClick={() => setOrder({...order, items: order.items.filter(i => i.id !== item.id)})}
-                          className="p-3 text-red-500/50 hover:text-red-500 hover:bg-red-500/10 rounded-2xl transition-all"
-                        >
+                        <button onClick={() => setOrder({...order, items: order.items.filter(i => i.id !== item.id)})} className="p-3 text-red-500/50 hover:text-red-500 hover:bg-red-500/10 rounded-2xl transition-all">
                           <Trash2 size={20}/>
                         </button>
                       </div>
@@ -400,30 +396,18 @@ export default function App() {
                 )}
               </div>
 
-              {/* Footer Section */}
               <div className="mt-12 space-y-6 pt-8 border-t border-gray-800">
                 <div className="space-y-1">
                   <label className={LABEL_CLASS}>{t.overallNotes}</label>
-                  <textarea 
-                    className={`${INPUT_CLASS} h-28 resize-none`} 
-                    value={order.overallNotes} 
-                    onChange={e => setOrder({...order, overallNotes: e.target.value})} 
-                    placeholder={t.overallNotesPlaceholder as string} 
-                  />
+                  <textarea className={`${INPUT_CLASS} h-28 resize-none`} value={order.overallNotes} onChange={e => setOrder({...order, overallNotes: e.target.value})} placeholder={t.overallNotesPlaceholder as string} />
                 </div>
-
                 {validationError && (
                   <div className="p-4 bg-red-900/10 text-red-400 rounded-2xl border border-red-800/20 text-xs font-bold flex items-center gap-3">
                     <AlertCircle size={18}/> {validationError}
                   </div>
                 )}
-
-                <button 
-                  onClick={handleOrderSubmit} 
-                  disabled={submissionStatus === 'submitting'}
-                  className="w-full bg-blue-600 text-white py-5 rounded-[24px] font-black text-lg shadow-2xl shadow-blue-500/30 hover:bg-blue-700 active:scale-[0.98] transition-all flex items-center justify-center gap-3 uppercase tracking-widest disabled:opacity-50"
-                >
-                  {submissionStatus === 'submitting' ? <RefreshCw className="animate-spin" /> : (editingId ? <CheckCircle size={24}/> : <Send size={20} />)}
+                <button onClick={handleOrderSubmit} disabled={submissionStatus === 'submitting'} className="w-full bg-blue-600 text-white py-5 rounded-[24px] font-black text-lg shadow-2xl shadow-blue-500/30 hover:bg-blue-700 active:scale-[0.98] transition-all flex items-center justify-center gap-3 uppercase tracking-widest disabled:opacity-50">
+                  {submissionStatus === 'submitting' ? <RefreshCw className="animate-spin" /> : (editingId ? <CheckCircle size={24}/> : <CloudUpload size={20} />)}
                   {editingId ? t.updateOrder : t.submitOrder}
                 </button>
               </div>
@@ -431,7 +415,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Success Feedback */}
         {submissionStatus === 'success' && (
           <div className="text-center py-24 animate-in zoom-in duration-500">
             <div className="w-24 h-24 rounded-full bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center mx-auto mb-6">
@@ -442,17 +425,11 @@ export default function App() {
           </div>
         )}
 
-        {/* List View / History */}
         {(activeTab === 'history' || (activeTab === 'pending' && currentUser.role !== 'sales')) && submissionStatus !== 'success' && (
           <div className="space-y-6 animate-in fade-in duration-500">
             <div className="relative group">
               <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-gray-500 group-focus-within:text-blue-500 transition-colors" size={20}/>
-              <input 
-                className={`${INPUT_CLASS} pl-14 bg-gray-900 border-gray-800/50 h-16 text-lg rounded-3xl shadow-xl`} 
-                placeholder={t.searchPlaceholder as string} 
-                value={searchTerm} 
-                onChange={e => setSearchTerm(e.target.value)} 
-              />
+              <input className={`${INPUT_CLASS} pl-14 bg-gray-900 border-gray-800/50 h-16 text-lg rounded-3xl shadow-xl`} placeholder={t.searchPlaceholder as string} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
             </div>
 
             {filtered.length === 0 ? (
@@ -494,28 +471,21 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Quick Actions based on role */}
                     <div className="mt-6 flex gap-2">
                       {currentUser.role === 'sales' && o.status === 'Pending Assistant' && (
-                        <button 
-                          onClick={() => { setEditingId(o.id!); setOrder({...o}); setActiveTab('pending'); }} 
-                          className="flex-1 bg-gray-800 hover:bg-gray-700 text-white py-3.5 rounded-2xl font-bold text-xs transition-all flex items-center justify-center gap-2"
-                        >
+                        <button onClick={() => { setEditingId(o.id!); setOrder({...o}); setActiveTab('pending'); }} className="flex-1 bg-gray-800 hover:bg-gray-700 text-white py-3.5 rounded-2xl font-bold text-xs transition-all flex items-center justify-center gap-2">
                           <Pencil size={14}/> {t.editOrder}
                         </button>
                       )}
-                      
                       {currentUser.role === 'assistant' && o.status === 'Pending Assistant' && (
                         <>
                           <button onClick={() => updateStatus(o.id!, { status: 'Pending Finance' }, "Approved by Support")} className="flex-1 bg-blue-600 text-white py-3.5 rounded-2xl font-bold text-xs hover:bg-blue-700">{t.approveQty}</button>
                           <button onClick={() => updateStatus(o.id!, { status: 'Rejected' }, "Rejected by Support")} className="flex-1 bg-red-900/20 text-red-500 py-3.5 rounded-2xl font-bold text-xs border border-red-900/20">{t.reject}</button>
                         </>
                       )}
-
                       {currentUser.role === 'finance' && o.status === 'Pending Finance' && (
                         <button onClick={() => updateStatus(o.id!, { status: 'Approved' }, "Finance Approved")} className="w-full bg-emerald-600 text-white py-3.5 rounded-2xl font-bold text-xs hover:bg-emerald-700">{t.approveOrder}</button>
                       )}
-
                       {currentUser.role === 'warehouse' && (o.status === 'Approved' || o.status === 'On Hold') && (
                         <button onClick={() => updateStatus(o.id!, { status: 'Ready for Driver' }, "Order Prepared")} className="w-full bg-orange-600 text-white py-3.5 rounded-2xl font-bold text-xs hover:bg-orange-700">{t.markReady}</button>
                       )}
@@ -528,11 +498,7 @@ export default function App() {
         )}
       </main>
 
-      <MagicParser 
-        isOpen={isMagicImportOpen} 
-        onClose={() => setIsMagicImportOpen(false)} 
-        onParsed={(data) => setOrder({...order, ...data})} 
-      />
+      <MagicParser isOpen={isMagicImportOpen} onClose={() => setIsMagicImportOpen(false)} onParsed={(data) => setOrder({...order, ...data})} />
     </div>
   );
 }

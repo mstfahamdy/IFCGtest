@@ -15,7 +15,6 @@ import { TRANSLATIONS } from './translations.ts';
 import { MagicParser } from './components/MagicParser.tsx';
 import { ApiService } from './services/apiService.ts';
 
-// --- STYLING CONSTANTS ---
 const INPUT_CLASS = "w-full bg-gray-900/50 border border-gray-800/50 rounded-2xl py-3.5 px-5 text-white focus:ring-2 focus:ring-blue-600 focus:border-transparent outline-none transition-all placeholder-gray-600 font-medium text-sm shadow-inner";
 const LABEL_CLASS = "text-[10px] font-black text-gray-500 px-1 uppercase tracking-[0.15em] mb-2 block";
 const CARD_CLASS = "glass rounded-[32px] p-6 shadow-2xl border border-gray-800/50";
@@ -70,28 +69,28 @@ export default function App() {
 
   const [order, setOrder] = useState<SalesOrder>(initialOrderState);
 
-  // --- REFRESH DATA FROM CLOUD ---
-  const refreshOrders = useCallback(async () => {
-    if (isSyncing) return;
-    setIsSyncing(true);
+  // --- SYNC ENGINE ---
+  const refreshFromCloud = useCallback(async (silent = false) => {
+    if (!silent) setIsSyncing(true);
     try {
       const orders = await ApiService.getOrders();
       setGlobalOrders(orders);
       setLastSync(new Date());
       setIsOnline(true);
     } catch (err) {
+      console.error("Cloud Sync Error:", err);
       setIsOnline(false);
     } finally {
-      setIsSyncing(false);
+      if (!silent) setIsSyncing(false);
     }
-  }, [isSyncing]);
-
-  // Initial load and setup 10s polling
-  useEffect(() => {
-    refreshOrders();
-    const interval = setInterval(refreshOrders, 10000); // 10 second refresh
-    return () => clearInterval(interval);
   }, []);
+
+  // Poll every 10 seconds for multi-device consistency
+  useEffect(() => {
+    refreshFromCloud(); // Initial fetch
+    const interval = setInterval(() => refreshFromCloud(true), 10000);
+    return () => clearInterval(interval);
+  }, [refreshFromCloud]);
 
   useEffect(() => {
     document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
@@ -110,10 +109,11 @@ export default function App() {
       return;
     }
     setSubmissionStatus('submitting');
+    setValidationError(null);
 
     try {
-      let finalOrder: SalesOrder;
       const isNew = !editingId;
+      let finalOrder: SalesOrder;
 
       if (!isNew) {
         const existing = globalOrders.find(o => o.id === editingId);
@@ -121,12 +121,16 @@ export default function App() {
             ...order, 
             id: editingId, 
             status: existing?.status || 'Pending Assistant',
-            history: [...(existing?.history || []), { role: currentUser?.role || 'Sales', action: 'Order Modified', date: new Date().toLocaleString(), user: currentUser?.name }] 
+            history: [...(existing?.history || []), { 
+              role: currentUser?.role || 'Sales', 
+              action: 'Order Modified (Cloud Sync)', 
+              date: new Date().toLocaleString(), 
+              user: currentUser?.name 
+            }] 
         };
       } else {
         finalOrder = {
           ...order,
-          id: Math.random().toString(36).substr(2, 9),
           serialNumber: `SO-${Math.floor(100000 + Math.random() * 900000)}`,
           status: 'Pending Assistant',
           createdBy: currentUser?.email,
@@ -136,43 +140,41 @@ export default function App() {
       }
 
       await ApiService.saveOrder(finalOrder, isNew);
-      await refreshOrders(); // Instant refresh after save
+      await refreshFromCloud(); // Refresh list immediately after save
       
-      localStorage.removeItem('ifcg_order_draft');
       setSubmissionStatus('success');
+      setOrder(initialOrderState);
       
       setTimeout(() => {
         setSubmissionStatus('idle');
         setEditingId(null);
-        setOrder(initialOrderState);
         setActiveTab('history');
       }, 2000);
-    } catch (error) {
-      setValidationError("Failed to save to cloud. Please try again.");
+    } catch (error: any) {
+      setValidationError("SharePoint Error: " + (error.message || "Check connection and list URL"));
       setSubmissionStatus('idle');
     }
   };
 
   const updateStatus = async (orderId: string, updates: Partial<SalesOrder>, actionMsg: string) => {
     try {
-      const historyItem = {
-        role: currentUser?.role || 'Unknown',
-        action: actionMsg,
-        date: new Date().toLocaleString(),
-        user: currentUser?.name || 'System'
-      };
-      
       const orderToUpdate = globalOrders.find(o => o.id === orderId);
       if (orderToUpdate) {
+        const historyItem = {
+          role: currentUser?.role || 'Unknown',
+          action: actionMsg,
+          date: new Date().toLocaleString(),
+          user: currentUser?.name || 'System'
+        };
         const newUpdates = {
           ...updates,
           history: [...(orderToUpdate.history || []), historyItem]
         };
         await ApiService.updateOrderStatus(orderId, newUpdates);
-        await refreshOrders();
+        await refreshFromCloud();
       }
     } catch (error) {
-      alert("Status update failed. Check connection.");
+      alert("Failed to update status on Cloud. Check SharePoint permissions.");
     }
   };
 
@@ -189,7 +191,7 @@ export default function App() {
     }
 
     return base.filter(o => 
-      o.customerName.toLowerCase().includes(searchTerm.toLowerCase()) || 
+      o.customerName?.toLowerCase().includes(searchTerm.toLowerCase()) || 
       o.serialNumber?.includes(searchTerm)
     );
   }, [globalOrders, currentUser, activeTab, searchTerm]);
@@ -209,11 +211,7 @@ export default function App() {
 
           <div className="grid grid-cols-1 gap-3">
             {(['sales', 'assistant', 'finance', 'warehouse', 'driver_supervisor'] as Role[]).map(role => (
-              <button 
-                key={role} 
-                onClick={() => setLoginTargetRole(role)}
-                className="group flex items-center justify-between p-5 rounded-3xl glass hover:border-blue-500/50 hover:bg-blue-600/5 transition-all active:scale-[0.98]"
-              >
+              <button key={role} onClick={() => setLoginTargetRole(role)} className="group flex items-center justify-between p-5 rounded-3xl glass hover:border-blue-500/50 hover:bg-blue-600/5 transition-all active:scale-[0.98]">
                 <div className="flex items-center gap-4">
                   <div className="w-10 h-10 rounded-xl bg-gray-800 flex items-center justify-center group-hover:bg-blue-600/20 group-hover:text-blue-400 transition-colors">
                     {role === 'sales' && <User size={20}/>}
@@ -229,7 +227,6 @@ export default function App() {
             ))}
           </div>
         </div>
-
         {loginTargetRole && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/90 backdrop-blur-xl animate-in zoom-in-95 duration-200">
             <div className="w-full max-sm glass p-10 rounded-[40px] text-center border border-white/5 mx-4">
@@ -238,13 +235,7 @@ export default function App() {
               </div>
               <h2 className="text-2xl font-black text-white mb-2">{t.enterPin}</h2>
               <p className="text-[10px] text-gray-500 font-black uppercase tracking-[0.2em] mb-8">{t[`role_${loginTargetRole}` as keyof typeof t] as string}</p>
-              
-              <input 
-                autoFocus 
-                type="password" 
-                placeholder="••••" 
-                className="w-full bg-gray-950 border-2 border-gray-800 rounded-2xl py-5 text-center text-4xl tracking-[0.5em] text-white focus:border-blue-600 outline-none transition-all mb-8 shadow-inner"
-                onKeyDown={e => {
+              <input autoFocus type="password" placeholder="••••" className="w-full bg-gray-950 border-2 border-gray-800 rounded-2xl py-5 text-center text-4xl tracking-[0.5em] text-white focus:border-blue-600 outline-none transition-all mb-8 shadow-inner" onKeyDown={e => {
                   if (e.key === 'Enter') {
                     const user = getUserByPin((e.target as HTMLInputElement).value);
                     if (user && user.role === loginTargetRole) {
@@ -273,7 +264,7 @@ export default function App() {
                 <h1 className="text-lg font-black tracking-tighter text-white">IFCG <span className="text-blue-500">CLOUD</span></h1>
                 <div className={`px-2 py-0.5 rounded-full border text-[8px] font-black uppercase tracking-widest flex items-center gap-1 ${isOnline ? 'bg-emerald-900/20 text-emerald-400 border-emerald-800/30' : 'bg-red-900/20 text-red-400 border-red-800/30'}`}>
                   {isSyncing ? <RefreshCw size={10} className="animate-spin text-blue-400" /> : (isOnline ? <Wifi size={10} /> : <WifiOff size={10} />)}
-                  {isOnline ? 'Live' : 'Disconnected'}
+                  {isSyncing ? 'Syncing...' : (isOnline ? 'Live' : 'No Link')}
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -334,7 +325,6 @@ export default function App() {
                     </div>
                    </div>
                 </div>
-
                 <div className="space-y-1">
                   <label className={LABEL_CLASS}>{t.receivingDate}</label>
                   <div className="relative">
@@ -342,7 +332,6 @@ export default function App() {
                     <input type="date" className={`${INPUT_CLASS} pl-12`} value={order.receivingDate} onChange={e => setOrder({...order, receivingDate: e.target.value})} />
                   </div>
                 </div>
-
                 <div className="space-y-1">
                   <label className={LABEL_CLASS}>{t.deliveryShift}</label>
                   <div className="relative">
@@ -365,7 +354,6 @@ export default function App() {
                     <Plus size={14}/> {t.addItem}
                   </button>
                 </div>
-
                 {order.items.length === 0 ? (
                   <div className="py-12 text-center bg-gray-950/30 rounded-3xl border border-dashed border-gray-800">
                     <Package className="w-12 h-12 text-gray-800 mx-auto mb-3" />
@@ -431,7 +419,6 @@ export default function App() {
               <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-gray-500 group-focus-within:text-blue-500 transition-colors" size={20}/>
               <input className={`${INPUT_CLASS} pl-14 bg-gray-900 border-gray-800/50 h-16 text-lg rounded-3xl shadow-xl`} placeholder={t.searchPlaceholder as string} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
             </div>
-
             {filtered.length === 0 ? (
               <div className="py-24 text-center glass rounded-[40px] border border-dashed border-gray-800">
                 <ClipboardList className="w-16 h-16 text-gray-800 mx-auto mb-4" />
@@ -457,7 +444,6 @@ export default function App() {
                         <div className="text-[10px] font-black text-blue-500 uppercase tracking-widest">{o.deliveryShift}</div>
                       </div>
                     </div>
-
                     <div className="bg-black/20 rounded-2xl p-6 border border-white/5 space-y-3">
                       {o.items.map((it, idx) => (
                         <div key={idx} className="flex justify-between text-xs items-center">
@@ -470,7 +456,6 @@ export default function App() {
                         <span className="text-blue-400 font-black text-xl">{o.items.reduce((s, i) => s + i.quantity, 0)}</span>
                       </div>
                     </div>
-
                     <div className="mt-6 flex gap-2">
                       {currentUser.role === 'sales' && o.status === 'Pending Assistant' && (
                         <button onClick={() => { setEditingId(o.id!); setOrder({...o}); setActiveTab('pending'); }} className="flex-1 bg-gray-800 hover:bg-gray-700 text-white py-3.5 rounded-2xl font-bold text-xs transition-all flex items-center justify-center gap-2">
@@ -497,7 +482,6 @@ export default function App() {
           </div>
         )}
       </main>
-
       <MagicParser isOpen={isMagicImportOpen} onClose={() => setIsMagicImportOpen(false)} onParsed={(data) => setOrder({...order, ...data})} />
     </div>
   );

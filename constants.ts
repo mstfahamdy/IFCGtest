@@ -87,5 +87,10 @@ export const DRIVERS_FLEET: DriverProfile[] = [
     { name: "Osama", phone: "01000000000", carNumber: "TEST-000" }
 ];
 
-// Base URL for SharePoint List. Replace 'YourSite' and 'SalesOrders' with actual names.
-export const MOCK_SHAREPOINT_URL = "https://yourtenant.sharepoint.com/sites/YourSite/_api/web/lists/getbytitle('SalesOrders')/items";
+/** 
+ * UPDATED ENDPOINT based on your link.
+ * Tenant: ifcgeg
+ * Site: Data-Analysis
+ * List Title: Assumed 'Orders' (Please ensure the list title in SharePoint matches 'Orders' exactly)
+ */
+export const SHAREPOINT_API_URL = "https://ifcgeg.sharepoint.com/sites/Data-Analysis/_api/web/lists/getbytitle('Orders')/items";
